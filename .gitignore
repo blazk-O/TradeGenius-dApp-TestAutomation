@@ -1,0 +1,28 @@
+node_modules/
+dist/
+reports/
+.env
+.env.local
+.env.*.local
+
+# MetaMask unpacked extension (downloaded at setup)
+extensions/metamask/
+extensions/*.crx
+extensions/*.zip
+
+# Playwright artifacts
+playwright-report/
+test-results/
+
+# OS / editor
+__MACOSX/
+.DS_Store
+.idea/
+.vscode/
+*.log
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+
+# Persistent browser context
+.user-data-dir/

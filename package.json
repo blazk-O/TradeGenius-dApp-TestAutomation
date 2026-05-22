@@ -1,0 +1,32 @@
+{
+  "name": "tradegenius-dapp-tests",
+  "version": "0.1.0",
+  "private": true,
+  "description": "BDD test automation for TradeGenius Asset Web3 DApp (Playwright + Cucumber + MetaMask)",
+  "engines": {
+    "node": ">=20"
+  },
+  "scripts": {
+    "test": "cucumber-js",
+    "test:headed": "HEADLESS=false cucumber-js",
+    "test:report": "cucumber-js && npm run report",
+    "report": "ts-node src/support/reporter.ts",
+    "setup:metamask": "ts-node scripts/download-metamask.ts",
+    "type-check": "tsc --noEmit",
+    "clean": "rm -rf reports dist"
+  },
+  "dependencies": {
+    "@cucumber/cucumber": "^11.0.1",
+    "dotenv": "^16.4.5",
+    "playwright": "^1.49.0"
+  },
+  "devDependencies": {
+    "@playwright/test": "^1.60.0",
+    "@types/node": "^22.10.0",
+    "@types/unzipper": "^0.10.10",
+    "cucumber-html-reporter": "^7.2.0",
+    "ts-node": "^10.9.2",
+    "typescript": "^5.6.3",
+    "unzipper": "^0.12.3"
+  }
+}
