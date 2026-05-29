@@ -28,6 +28,12 @@ const PROFILE_AVATAR_SELECTORS: ReadonlyArray<string> = [
   '[class*="avatar" i]',
 ];
 
+const USERNAME_MODAL_SELECTORS: ReadonlyArray<string> = [
+  '[role="dialog"]:has-text("Username"):has-text("You can only choose this once")',
+  '[role="dialog"]:has-text("Username"):has-text("Next")',
+  'text=You can only choose this once.',
+];
+
 const ADDRESS_REGEX = /(0x[a-fA-F0-9]{4,40}(?:\.{2,3}[a-fA-F0-9]{2,8})?)/;
 
 export class AssetPage extends BasePage {
@@ -42,8 +48,11 @@ export class AssetPage extends BasePage {
 
   async waitForPageReady(): Promise<void> {
     await this.waitForNetworkIdle();
+    if (await this.isUsernameOnboardingVisible()) return;
+    if (await this.isUserLoggedIn()) return;
+
     const button = await this.findConnectButton({ optional: true });
-    if (button) {
+    if (await this.isVisible(button, defaultTimeouts.uiElement)) {
       await this.waitForVisible(button, defaultTimeouts.uiElement);
     }
   }
@@ -51,6 +60,11 @@ export class AssetPage extends BasePage {
   async clickConnectWallet(): Promise<void> {
     const button = await this.findConnectButton();
     await this.safeClick(button);
+  }
+
+  async waitForConnectButtonVisible(): Promise<void> {
+    const button = await this.findConnectButton();
+    await this.waitForVisible(button, defaultTimeouts.uiElement);
   }
 
   async getWalletButtonText(): Promise<string> {
@@ -69,6 +83,20 @@ export class AssetPage extends BasePage {
     }
     const bodyText = (await this.page.locator('body').textContent()) ?? '';
     return ADDRESS_REGEX.test(bodyText);
+  }
+
+  async isUsernameOnboardingVisible(): Promise<boolean> {
+    for (const selector of USERNAME_MODAL_SELECTORS) {
+      const locator = this.page.locator(selector).first();
+      if (await this.isVisible(locator, 1_500)) return true;
+    }
+
+    const usernameHeading = this.page.getByText(/^Username$/).first();
+    const nextButton = this.page.getByRole('button', { name: /^Next$/ }).first();
+    return (
+      await this.isVisible(usernameHeading, 1_500) &&
+      await this.isVisible(nextButton, 1_500)
+    );
   }
 
   async getConnectedAddress(): Promise<string> {

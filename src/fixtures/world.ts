@@ -27,7 +27,17 @@ export class DAppWorld extends World {
   }
 
   requirePage(): Page {
-    if (!this.page) throw new Error('World.page is not initialised');
+    if (!this.page || this.page.isClosed()) {
+      const replacement = this.context
+        ?.pages()
+        .find((page) => !page.isClosed() && !page.url().startsWith('chrome-extension://'));
+      if (replacement) {
+        this.page = replacement;
+        this.assetPage = new AssetPage(replacement);
+        this.walletModal = new WalletModal(replacement);
+      }
+    }
+    if (!this.page || this.page.isClosed()) throw new Error('World.page is not initialised');
     return this.page;
   }
 
@@ -37,11 +47,13 @@ export class DAppWorld extends World {
   }
 
   requireAssetPage(): AssetPage {
+    this.requirePage();
     if (!this.assetPage) throw new Error('World.assetPage is not initialised');
     return this.assetPage;
   }
 
   requireWalletModal(): WalletModal {
+    this.requirePage();
     if (!this.walletModal) throw new Error('World.walletModal is not initialised');
     return this.walletModal;
   }
@@ -49,6 +61,30 @@ export class DAppWorld extends World {
   requireMetaMask(): MetaMaskExtension {
     if (!this.metaMask) throw new Error('World.metaMask is not initialised');
     return this.metaMask;
+  }
+
+  async openFreshAssetPage(): Promise<AssetPage> {
+    const page = await this.requireContext().newPage();
+    this.page = page;
+    this.assetPage = new AssetPage(page);
+    this.walletModal = new WalletModal(page);
+    await this.assetPage.navigate();
+    return this.assetPage;
+  }
+
+  async waitForAppPage(timeoutMs = 10_000): Promise<AssetPage> {
+    const existing = this.requireContext()
+      .pages()
+      .find((page) => !page.isClosed() && !page.url().startsWith('chrome-extension://'));
+    const page = existing ?? await this.requireContext().waitForEvent('page', {
+      predicate: (candidate) => !candidate.url().startsWith('chrome-extension://'),
+      timeout: timeoutMs,
+    });
+    await page.waitForLoadState('domcontentloaded').catch(() => undefined);
+    this.page = page;
+    this.assetPage = new AssetPage(page);
+    this.walletModal = new WalletModal(page);
+    return this.assetPage;
   }
 }
 

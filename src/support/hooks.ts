@@ -5,17 +5,16 @@ import {
   Before,
   BeforeAll,
   After,
-  AfterAll,
   Status,
   ITestCaseHookParameter,
 } from '@cucumber/cucumber';
+import type { BrowserContext, Page } from 'playwright';
 import { DAppWorld } from '../fixtures/world';
 import { env } from '../config/env';
 import { launchWithMetaMask } from '../wallet/extensionLoader';
 import { MetaMaskExtension } from '../wallet/MetaMaskExtension';
 import { AssetPage } from '../pages/AssetPage';
 import { WalletModal } from '../pages/WalletModal';
-import { generateHtmlReport } from './reporter';
 
 BeforeAll({ timeout: 5 * 60 * 1000 }, async function () {
   if (!fs.existsSync(env.metamaskExtensionPath) ||
@@ -41,8 +40,11 @@ Before({ timeout: 3 * 60 * 1000 }, async function (this: DAppWorld, scenario: IT
   (this as unknown as { __consoleErrors: string[] }).__consoleErrors = errors;
   context.on('weberror', (err) => errors.push(String(err.error())));
 
-  const existingPage = context.pages()[0];
+  const existingPage = context
+    .pages()
+    .find((candidate) => !candidate.url().startsWith('chrome-extension://'));
   const page = existingPage ?? (await context.newPage());
+  await resetDAppSession(context, page);
   this.page = page;
   page.on('pageerror', (err) => errors.push(String(err)));
   page.on('console', (msg) => {
@@ -61,6 +63,32 @@ Before({ timeout: 3 * 60 * 1000 }, async function (this: DAppWorld, scenario: IT
   await page.bringToFront();
 });
 
+async function resetDAppSession(context: BrowserContext, page: Page): Promise<void> {
+  const origin = new URL(env.targetUrl).origin;
+  await context.clearCookies().catch(() => undefined);
+
+  const session = await context.newCDPSession(page).catch(() => undefined);
+  if (!session) return;
+  try {
+    await session.send('Storage.clearDataForOrigin', {
+      origin,
+      storageTypes: [
+        'cookies',
+        'local_storage',
+        'indexeddb',
+        'session_storage',
+        'cache_storage',
+        'websql',
+        'service_workers',
+      ].join(','),
+    });
+  } catch {
+    // Best-effort isolation; the scenario assertions will surface any remaining state.
+  } finally {
+    await session.detach().catch(() => undefined);
+  }
+}
+
 After(async function (this: DAppWorld, scenario: ITestCaseHookParameter) {
   if (env.screenshotOnFailure && scenario.result?.status === Status.FAILED && this.assetPage) {
     try {
@@ -72,14 +100,5 @@ After(async function (this: DAppWorld, scenario: ITestCaseHookParameter) {
   }
   if (this.context) {
     await this.context.close().catch(() => undefined);
-  }
-});
-
-AfterAll(async function () {
-  try {
-    generateHtmlReport();
-  } catch (err) {
-    // eslint-disable-next-line no-console
-    console.warn('[report] Failed to generate HTML report:', (err as Error).message);
   }
 });

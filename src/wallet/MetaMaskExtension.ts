@@ -6,6 +6,34 @@ import { getMetaMaskExtensionId } from './extensionLoader';
 const ONBOARDING_URL_RE = /chrome-extension:\/\/[a-p]{32}\/home\.html#onboarding/;
 const HOME_URL_RE = /chrome-extension:\/\/[a-p]{32}\/home\.html/;
 const NOTIFICATION_URL_RE = /chrome-extension:\/\/[a-p]{32}\/notification\.html/;
+const ADDRESS_RE = /0x[a-fA-F0-9]{4,40}(?:\.{2,3}[a-fA-F0-9]{2,8})?/;
+const PENDING_NOTIFICATION_URL_RE =
+  /#(?:connect|confirm|confirmation|signature|permission|transaction|switch|approve|request|account)\b/i;
+
+const NOTIFICATION_ACTION_SELECTORS: ReadonlyArray<string> = [
+  '[data-testid="confirm-btn"]',
+  '[data-testid="confirmation-submit-button"]',
+  '[data-testid="page-container-footer-next"]',
+  '[data-testid="signature-confirm-button"]',
+  '[data-testid="confirm-footer-button"]',
+  '[data-testid="request-signature__sign"]',
+  '[data-testid="signature-sign-button"]',
+  '[data-testid="signature-warning-sign-button"]',
+  '.page-container__footer [data-testid="page-container-footer-next"]',
+  '.confirmation-footer__actions button.btn-primary',
+  '.request-signature__footer [data-testid="request-signature__sign"]',
+  '.signature-request-footer [data-testid="signature-sign-button"]',
+  'button:has-text("Connect")',
+  'button:has-text("Confirm")',
+  'button:has-text("Sign")',
+  'button:has-text("Approve")',
+  'button:has-text("Switch network")',
+  'button:has-text("Switch")',
+  'button:has-text("Next")',
+];
+
+const NOTIFICATION_IDLE_MS = 30_000;
+const NOTIFICATION_HYDRATION_MS = 12_000;
 
 export class MetaMaskExtension {
   private extensionId: string | undefined;
@@ -38,13 +66,16 @@ export class MetaMaskExtension {
   }
 
   async completeOnboarding(): Promise<void> {
-    const page = await this.waitForOnboardingPage(45_000);
-    if (!page) {
-      throw new Error('MetaMask onboarding page did not appear.');
-    }
+    let page = await this.waitForOnboardingPage(45_000);
+    if (!page) page = await this.openHomePage();
 
     await page.bringToFront();
     await page.waitForLoadState('domcontentloaded');
+
+    if (await this.unlockIfNeeded(page)) {
+      await this.dismissPostOnboardingPopups(page);
+      return;
+    }
 
     const termsCheckbox = page.locator('[data-testid="onboarding-terms-checkbox"]').first();
     if (await this.locatorVisible(termsCheckbox, 5_000)) {
@@ -91,39 +122,12 @@ export class MetaMaskExtension {
   }
 
   async approveConnection(timeoutMs: number = defaultTimeouts.walletPopup): Promise<void> {
-    const popup = await this.waitForPopup(timeoutMs);
-    await popup.bringToFront();
-
-    const nextLocators: ReadonlyArray<string> = [
-      '[data-testid="page-container-footer-next"]',
-      'button:has-text("Next")',
-    ];
-    for (const sel of nextLocators) {
-      const locator = popup.locator(sel).first();
-      if (await this.locatorVisible(locator, 5_000)) {
-        await locator.click({ timeout: 5_000 }).catch(() => undefined);
-        break;
-      }
-    }
-
-    const confirmLocators: ReadonlyArray<string> = [
-      '[data-testid="page-container-footer-next"]',
-      '[data-testid="confirm-btn"]',
-      'button:has-text("Connect")',
-      'button:has-text("Confirm")',
-    ];
-    for (const sel of confirmLocators) {
-      const locator = popup.locator(sel).first();
-      if (await this.locatorVisible(locator, 5_000)) {
-        await locator.click({ timeout: 5_000 }).catch(() => undefined);
-        return;
-      }
-    }
-    throw new Error('Could not locate the Connect/Confirm button in MetaMask popup.');
+    await this.waitForPopup(timeoutMs);
+    await this.drainNotifications(timeoutMs);
   }
 
   async signMessage(timeoutMs: number = defaultTimeouts.walletPopup): Promise<void> {
-    const popup = await this.waitForPopup(timeoutMs);
+    const popup = await this.waitForPopup(timeoutMs, { openIfMissing: false });
     await popup.bringToFront();
 
     const signButtons: ReadonlyArray<string> = [
@@ -144,52 +148,249 @@ export class MetaMaskExtension {
   }
 
   async getPopupPage(): Promise<Page | undefined> {
-    return this.context.pages().find((p) => NOTIFICATION_URL_RE.test(p.url()));
+    return this.getPopupPages()[0];
   }
 
-  async waitForPopup(timeoutMs: number = defaultTimeouts.walletPopup): Promise<Page> {
+  async waitForPopup(
+    timeoutMs: number = defaultTimeouts.walletPopup,
+    opts: { openIfMissing?: boolean } = {},
+  ): Promise<Page> {
+    const openIfMissing = opts.openIfMissing ?? true;
     const existing = await this.getPopupPage();
     if (existing) {
       await existing.waitForLoadState('domcontentloaded').catch(() => undefined);
       return existing;
     }
-    const popup = await Promise.race([
-      this.context.waitForEvent('page', {
+    let popup: Page;
+    try {
+      popup = await this.context.waitForEvent('page', {
         predicate: (p) => NOTIFICATION_URL_RE.test(p.url()),
         timeout: timeoutMs,
-      }),
-      new Promise<Page>((_, reject) =>
-        setTimeout(() => reject(new Error('Timed out waiting for MetaMask popup')), timeoutMs),
-      ),
-    ]);
+      });
+    } catch {
+      if (!openIfMissing) throw new Error('Timed out waiting for MetaMask popup');
+      popup = await this.openNotificationPage();
+    }
     await popup.waitForLoadState('domcontentloaded').catch(() => undefined);
     return popup;
   }
 
   async getAddress(): Promise<string> {
-    const id = await this.getExtensionId();
-    const homePage = await this.context.newPage();
+    const homePage = await this.openHomePage();
     try {
-      await homePage.goto(`chrome-extension://${id}/home.html`, {
-        waitUntil: 'domcontentloaded',
-      });
+      await this.unlockIfNeeded(homePage);
+
       const accountMenu = homePage
-        .locator('[data-testid="account-menu-icon"], [data-testid="account-options-menu-button"]')
+        .locator(
+          [
+            '[data-testid="account-menu-icon"]',
+            '[data-testid="account-options-menu-button"]',
+            '[data-testid="account-menu-icon"]',
+            '[data-testid="app-header-account-menu-button"]',
+          ].join(', '),
+        )
         .first();
       if (await this.locatorVisible(accountMenu, 8_000)) {
         await accountMenu.click().catch(() => undefined);
       }
-      const addressLocator = homePage
-        .locator('[data-testid="account-address-text"], [data-testid="address-copy-button-text"]')
-        .first();
-      await addressLocator.waitFor({ state: 'visible', timeout: 8_000 });
-      const raw = (await addressLocator.textContent())?.trim() ?? '';
-      const match = raw.match(/0x[a-fA-F0-9]{4,40}/);
-      if (!match) throw new Error(`Could not parse address from "${raw}"`);
+
+      const addressSelectors: ReadonlyArray<string> = [
+        '[data-testid="account-address-text"]',
+        '[data-testid="address-copy-button-text"]',
+        '[data-testid="app-header-copy-button"]',
+        '[data-testid="selected-account-copy"]',
+        '[data-testid="account-list-menu-details"]',
+        '[class*="address" i]',
+      ];
+      for (const selector of addressSelectors) {
+        const locator = homePage.locator(selector).first();
+        if (await this.locatorVisible(locator, 3_000)) {
+          const raw = (await locator.textContent())?.trim() ?? '';
+          const match = raw.match(ADDRESS_RE);
+          if (match) return match[0];
+        }
+      }
+
+      const bodyText = (await homePage.locator('body').textContent()) ?? '';
+      const match = bodyText.match(ADDRESS_RE);
+      if (!match) throw new Error(`Could not parse wallet address from MetaMask home. Body text: "${bodyText.slice(0, 500)}"`);
       return match[0];
     } finally {
       await homePage.close().catch(() => undefined);
     }
+  }
+
+  private async openHomePage(): Promise<Page> {
+    const id = await this.getExtensionId();
+    const page = await this.context.newPage();
+    await page.goto(`chrome-extension://${id}/home.html`, {
+      waitUntil: 'domcontentloaded',
+    });
+    return page;
+  }
+
+  private async openNotificationPage(): Promise<Page> {
+    const id = await this.getExtensionId();
+    const page = await this.context.newPage();
+    await page.goto(`chrome-extension://${id}/notification.html`, {
+      waitUntil: 'domcontentloaded',
+    });
+    return page;
+  }
+
+  private getPopupPages(): Page[] {
+    return this.context
+      .pages()
+      .filter((page) => !page.isClosed() && NOTIFICATION_URL_RE.test(page.url()));
+  }
+
+  private async drainNotifications(timeoutMs: number): Promise<void> {
+    const deadline = Date.now() + timeoutMs;
+    let clickedCount = 0;
+    let lastPendingUrl = '';
+    let lastActionAt = Date.now();
+
+    while (Date.now() < deadline) {
+      const popup = await this.findOrOpenActionableNotification(
+        clickedCount > 0 ? 5_000 : 15_000,
+      );
+      if (!popup) {
+        if (clickedCount > 0 && Date.now() - lastActionAt >= NOTIFICATION_IDLE_MS) return;
+        await this.sleep(500);
+        continue;
+      }
+
+      await this.waitForNotificationHydration(popup, NOTIFICATION_HYDRATION_MS);
+      await popup.bringToFront().catch(() => undefined);
+      lastPendingUrl = popup.url();
+
+      if (await this.clickNotificationAction(popup)) {
+        clickedCount += 1;
+        lastActionAt = Date.now();
+        if (clickedCount >= 3) return;
+        await this.sleep(1_250);
+        continue;
+      }
+
+      const hasPendingUrl = PENDING_NOTIFICATION_URL_RE.test(popup.url());
+      const bodyText = ((await popup.locator('body').textContent().catch(() => '')) ?? '').trim();
+      if (clickedCount > 0 && !hasPendingUrl && bodyText === '' && Date.now() - lastActionAt >= NOTIFICATION_IDLE_MS) {
+        return;
+      }
+      await this.sleep(500);
+    }
+
+    if (clickedCount === 0) {
+      throw new Error('Could not locate an actionable MetaMask notification.');
+    }
+    throw new Error(`MetaMask notifications did not drain before timeout. Last URL: ${lastPendingUrl}`);
+  }
+
+  private async findOrOpenActionableNotification(timeoutMs: number): Promise<Page | undefined> {
+    const deadline = Date.now() + timeoutMs;
+    while (Date.now() < deadline) {
+      const active = this.pickActiveNotificationPage();
+      if (active) {
+        await this.waitForNotificationHydration(active, NOTIFICATION_HYDRATION_MS);
+        if (await this.notificationHasAction(active)) return active;
+      }
+
+      if (!active) {
+        const eventPage = await this.waitForNextNotification(500);
+        if (eventPage) {
+          await this.waitForNotificationHydration(eventPage, NOTIFICATION_HYDRATION_MS);
+          if (await this.notificationHasAction(eventPage)) return eventPage;
+        }
+      }
+
+      const opened = await this.openNotificationPage().catch(() => undefined);
+      if (opened) {
+        await this.waitForNotificationHydration(opened, NOTIFICATION_HYDRATION_MS);
+        if (await this.notificationHasAction(opened)) return opened;
+      }
+
+      await this.sleep(500);
+    }
+    return undefined;
+  }
+
+  private pickActiveNotificationPage(): Page | undefined {
+    const pages = this.getPopupPages();
+    return pages.find((page) => PENDING_NOTIFICATION_URL_RE.test(page.url())) ?? pages[0];
+  }
+
+  private async waitForNextNotification(timeoutMs: number): Promise<Page | undefined> {
+    try {
+      const popup = await this.context.waitForEvent('page', {
+        predicate: (page) => NOTIFICATION_URL_RE.test(page.url()),
+        timeout: timeoutMs,
+      });
+      await popup.waitForLoadState('domcontentloaded').catch(() => undefined);
+      return popup;
+    } catch {
+      return undefined;
+    }
+  }
+
+  private async clickNotificationAction(page: Page): Promise<boolean> {
+    for (const selector of NOTIFICATION_ACTION_SELECTORS) {
+      const locator = page.locator(selector).last();
+      if (!(await this.locatorVisible(locator, 1_000))) continue;
+      if (!(await locator.isEnabled().catch(() => true))) continue;
+      await locator.scrollIntoViewIfNeeded().catch(() => undefined);
+      await locator
+        .click({ timeout: 5_000 })
+        .catch(async () => locator.click({ timeout: 5_000, force: true }));
+      return true;
+    }
+    return false;
+  }
+
+  private async notificationHasAction(page: Page): Promise<boolean> {
+    if (page.isClosed()) return false;
+    await this.waitForNotificationHydration(page, 2_000);
+    for (const selector of NOTIFICATION_ACTION_SELECTORS) {
+      const locator = page.locator(selector).last();
+      if (await this.locatorVisible(locator, 500) && await locator.isEnabled().catch(() => true)) {
+        return true;
+      }
+    }
+    return false;
+  }
+
+  private async waitForNotificationHydration(page: Page, timeoutMs: number): Promise<void> {
+    if (page.isClosed()) return;
+    const deadline = Date.now() + timeoutMs;
+    await page.waitForLoadState('domcontentloaded').catch(() => undefined);
+
+    while (Date.now() < deadline && !page.isClosed()) {
+      const bodyText = ((await page.locator('body').textContent().catch(() => '')) ?? '').trim();
+      if (bodyText !== '') return;
+      if (PENDING_NOTIFICATION_URL_RE.test(page.url())) return;
+      for (const selector of NOTIFICATION_ACTION_SELECTORS) {
+        const locator = page.locator(selector).last();
+        if (await this.locatorVisible(locator, 250) && await locator.isEnabled().catch(() => true)) {
+          return;
+        }
+      }
+      await this.sleep(250);
+    }
+  }
+
+  private async unlockIfNeeded(page: Page): Promise<boolean> {
+    const passwordInput = page
+      .locator('[data-testid="unlock-password"], input[type="password"]')
+      .first();
+    if (!(await this.locatorVisible(passwordInput, 3_000))) return false;
+
+    await passwordInput.fill(this.password);
+    const unlockButton = page
+      .locator('[data-testid="unlock-submit"], button:has-text("Unlock")')
+      .first();
+    await unlockButton.click({ timeout: 5_000 });
+    await page.waitForLoadState('domcontentloaded').catch(() => undefined);
+    await page.waitForTimeout(1_000);
+    return true;
   }
 
   private async fillSeedPhrase(page: Page): Promise<void> {
@@ -281,5 +482,9 @@ export class MetaMaskExtension {
     } catch {
       return false;
     }
+  }
+
+  private async sleep(ms: number): Promise<void> {
+    await new Promise((resolve) => setTimeout(resolve, ms));
   }
 }

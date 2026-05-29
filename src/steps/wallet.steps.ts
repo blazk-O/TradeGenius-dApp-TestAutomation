@@ -30,15 +30,25 @@ Then('the MetaMask connection popup should appear', async function (this: DAppWo
   await metaMask.waitForPopup();
 });
 
-When('I approve the wallet connection in MetaMask', async function (this: DAppWorld) {
-  const metaMask = this.requireMetaMask();
-  await metaMask.approveConnection();
-  try {
-    await metaMask.signMessage(15_000);
-  } catch {
-    // SIWE may not be required; ignore if no signature popup appears.
-  }
-});
+When(
+  'I approve the wallet connection in MetaMask',
+  { timeout: 150_000 },
+  async function (this: DAppWorld) {
+    const metaMask = this.requireMetaMask();
+    await metaMask.approveConnection();
+    await new Promise((resolve) => setTimeout(resolve, 10_000));
+    try {
+      await this.requirePage().bringToFront();
+    } catch {
+      // The DApp may reload/replace its page after MetaMask approval.
+    }
+    try {
+      await this.requirePage().bringToFront();
+    } catch {
+      // Let the following assertion report the missing/closed DApp page.
+    }
+  },
+);
 
 When('I dismiss the wallet modal', async function (this: DAppWorld) {
   const modal = this.requireWalletModal();

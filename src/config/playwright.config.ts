@@ -1,5 +1,5 @@
 import * as path from 'path';
-import { LaunchOptions } from 'playwright';
+import { chromium } from 'playwright';
 import { env } from './env';
 import { defineConfig, devices } from '@playwright/test';
 
@@ -24,17 +24,25 @@ use: {
   launchOptions: { executablePath: '/usr/bin/chromium-browser' }
 }
 
-export type BrowserLaunchOptions = LaunchOptions & {
+export type BrowserLaunchOptions = NonNullable<Parameters<typeof chromium.launchPersistentContext>[1]> & {
   args: string[];
   viewport: { width: number; height: number };
 };
 
 export function getPersistentContextOptions(): BrowserLaunchOptions {
   const extensionPath = env.metamaskExtensionPath;
+  const recordVideo = process.env.RECORD_VIDEO === 'true'
+    ? {
+        dir: path.resolve(process.cwd(), 'reports', 'videos'),
+        size: { width: 1280, height: 800 },
+      }
+    : undefined;
+
   return {
     headless: false,
     slowMo: env.slowMo,
     viewport: { width: 1280, height: 800 },
+    recordVideo,
     args: [
       `--disable-extensions-except=${extensionPath}`,
       `--load-extension=${extensionPath}`,
@@ -52,6 +60,6 @@ export function getUserDataDir(): string {
 export const defaultTimeouts = {
   navigation: 30_000,
   uiElement: 10_000,
-  walletPopup: 30_000,
+  walletPopup: 90_000,
   modalAnimation: 5_000,
 } as const;

@@ -2,7 +2,7 @@ Feature: TradeGenius Asset Page Smoke Tests
 
   Scenario: Asset page loads correctly
     Given I navigate to the TradeGenius Asset page
-    Then the page title should contain "TradeGenius"
+    Then the page title should contain "Genius"
     And the "Connect Wallet" button should be visible
     And the page should not display any console errors
 

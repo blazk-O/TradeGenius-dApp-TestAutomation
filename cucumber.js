@@ -7,7 +7,11 @@
 
 const common = {
   requireModule: ['ts-node/register'],
-  require: ['src/steps/**/*.ts', 'src/support/**/*.ts'],
+  require: [
+    'src/fixtures/world.ts',
+    'src/support/**/*.ts',
+    'src/steps/**/*.ts',
+  ],
   paths: ['src/features/**/*.feature'],
   format: [
     'progress-bar',
